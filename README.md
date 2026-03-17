@@ -1,5 +1,12 @@
 # Alertes d’offres d’alternance automatisées (AWS S3 → Lambda → DynamoDB → SNS)
 
+## 🖊️ Auteur
+
+- **Nom :** LO 
+- **Prénom :** Pape 
+- **Email :** pape.lo@estiam.com  
+- **GitHub :** [dspitech](https://github.com/dspitech)  
+
 Projet AWS serverless : à chaque **nouvelle offre** déposée dans un **bucket S3**, une **Lambda** est déclenchée pour **enregistrer l’offre dans DynamoDB** et **notifier via SNS** les étudiants dont le domaine correspond. Les exécutions et erreurs sont consultables dans **CloudWatch Logs**.
 
 > Ce dépôt contient un guide de déploiement pas à pas (AWS CLI / CloudShell) : `LAB-024-S3-Lambda-SNS-Alertes-offres-alternance.md`.
@@ -32,6 +39,18 @@ Projet AWS serverless : à chaque **nouvelle offre** déposée dans un **bucket 
 
 ---
 
+## Mapping Domaine → Préfixe du fichier S3
+
+| Domaine | Préfixe attendu | Exemple |
+| --- | --- | --- |
+| Cloud | `Cloud_` | `Cloud_Architecte_AWS.pdf` |
+| Cybersecurity | `Cyber_` | `Cyber_Analyste_SOC.pdf` |
+| Architecture | `Archi_` | `Archi_Urbaniste_SI.pdf` |
+| Web et Mobile | `Web_` | `Web_Dev_Fullstack.pdf` |
+| Général (fallback) | *(pas de `_`)* | `OffreGenerale.pdf` |
+
+---
+
 ## Prérequis
 
 - **Compte AWS** avec droits : S3, Lambda, SNS, DynamoDB, IAM, CloudWatch
@@ -42,203 +61,41 @@ Projet AWS serverless : à chaque **nouvelle offre** déposée dans un **bucket 
 
 ---
 
-## Déploiement (AWS CLI / CloudShell)
+## Documentation (important)
 
-Les commandes détaillées sont dans `LAB-024-S3-Lambda-SNS-Alertes-offres-alternance.md`. Ci-dessous un condensé “quickstart”.
+- **Guide de lab (déploiement complet + commandes AWS CLI + code Lambda + tests + nettoyage)** : `LAB-024-S3-Lambda-SNS-Alertes-offres-alternance.md`
 
-### 1) Créer le topic SNS + abonnement email
-
-```bash
-TOPIC_ARN=$(aws sns create-topic \
-  --name AlertesOffres \
-  --query 'TopicArn' \
-  --output text \
-  --region eu-west-3)
-
-aws sns subscribe \
-  --topic-arn "$TOPIC_ARN" \
-  --protocol email \
-  --notification-endpoint "ton.email@exemple.com" \
-  --region eu-west-3
-
-echo "Topic ARN: $TOPIC_ARN"
-```
-
-> Important : confirmer l’abonnement depuis l’email reçu.
-
-### 2) Créer les tables DynamoDB
-
-```bash
-aws dynamodb create-table \
-  --table-name TableOffres \
-  --attribute-definitions AttributeName=ID,AttributeType=S \
-  --key-schema AttributeName=ID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region eu-west-3
-
-aws dynamodb create-table \
-  --table-name TableEtudiants \
-  --attribute-definitions AttributeName=Email,AttributeType=S \
-  --key-schema AttributeName=Email,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region eu-west-3
-```
-
-### 3) Insérer des étudiants (exemple)
-
-```bash
-aws dynamodb put-item \
-  --table-name TableEtudiants \
-  --item '{
-    "Email": {"S": "etudiant@exemple.com"},
-    "Nom": {"S": "Etudiant"},
-    "Domaines": {"SS": ["Cloud", "DevOps", "Général"]}
-  }' \
-  --region eu-west-3
-```
-
-### 4) Créer le rôle IAM de la Lambda
-
-```bash
-cat > trust-policy.json << 'EOL'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": { "Service": "lambda.amazonaws.com" },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOL
-
-aws iam create-role \
-  --role-name LambdaOffreRole \
-  --assume-role-policy-document file://trust-policy.json
-
-aws iam attach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-aws iam attach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
-aws iam attach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess
-aws iam attach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-```
-
-> Bonne pratique : en production, remplacer ces policies larges par une policy **least privilege**.
-
-### 5) Créer le bucket S3 (déclencheur)
-
-```bash
-BUCKET_NAME="offres-alternance-$(date +%s)"
-aws s3 mb "s3://$BUCKET_NAME" --region eu-west-3
-echo "Bucket: $BUCKET_NAME"
-```
-
-### 6) Créer & déployer la Lambda
-
-Crée `lambda_function.py` (voir le code complet dans le lab), puis :
-
-```bash
-zip function.zip lambda_function.py
-
-ROLE_ARN=$(aws iam get-role \
-  --role-name LambdaOffreRole \
-  --query 'Role.Arn' \
-  --output text)
-
-aws lambda create-function \
-  --function-name NotifieurOffres \
-  --zip-file fileb://function.zip \
-  --handler lambda_function.lambda_handler \
-  --runtime python3.11 \
-  --role "$ROLE_ARN" \
-  --environment "Variables={SNS_TOPIC_ARN=$TOPIC_ARN}" \
-  --region eu-west-3
-```
-
-### 7) Connecter S3 → Lambda (event notification)
-
-```bash
-aws lambda add-permission \
-  --function-name NotifieurOffres \
-  --statement-id s3-invoke \
-  --action "lambda:InvokeFunction" \
-  --principal s3.amazonaws.com \
-  --source-arn "arn:aws:s3:::$BUCKET_NAME" \
-  --region eu-west-3
-
-cat > notification.json << EOL
-{
-  "LambdaFunctionConfigurations": [
-    {
-      "LambdaFunctionArn": "$(aws lambda get-function --function-name NotifieurOffres --query "Configuration.FunctionArn" --output text)",
-      "Events": ["s3:ObjectCreated:*"]
-    }
-  ]
-}
-EOL
-
-aws s3api put-bucket-notification-configuration \
-  --bucket "$BUCKET_NAME" \
-  --notification-configuration file://notification.json
-```
+> Le `README` reste volontairement “vitrine projet”. Toute la configuration et les commandes doivent être suivies depuis le fichier de lab.
 
 ---
 
-## Tests
+## Comment ça marche (logique fonctionnelle)
 
-### Tester SNS (envoi direct)
-
-```bash
-aws sns publish \
-  --topic-arn "$TOPIC_ARN" \
-  --message "Test SNS" \
-  --subject "TEST SNS" \
-  --region eu-west-3
-```
-
-### Tester le flux complet (upload S3)
-
-```bash
-echo "Contenu offre" > Cloud_Architecte.pdf
-aws s3 cp Cloud_Architecte.pdf "s3://$BUCKET_NAME/"
-```
-
-Vérifier les écritures dans DynamoDB :
-
-```bash
-aws dynamodb scan --table-name TableOffres --region eu-west-3
-```
-
-Logs Lambda :
-- Console AWS → **Lambda** → `NotifieurOffres` → **Monitor** → **View logs in CloudWatch**
+- **Détection du domaine** : le domaine est déduit du **préfixe** du fichier avant `_` (ex: `Cloud_...` → `Cloud`).  
+  Sans `_`, l’offre est traitée comme **Général**.
+- **Ciblage étudiants** : chaque étudiant possède une liste `Domaines` (ex: `["Cloud", "DevOps", "Général"]`).  
+  La Lambda notifie uniquement si le domaine de l’offre est présent dans `Domaines`.
+- **Traçabilité** : chaque offre est historisée dans `TableOffres` avec un identifiant unique + date + URL présignée.
 
 ---
 
-## Variables d’environnement (Lambda)
+## Configuration (résumé)
 
-- **`SNS_TOPIC_ARN`** *(obligatoire)* : ARN du topic SNS utilisé pour publier les notifications
+- **Région** : `eu-west-3`
+- **Ressources AWS** :
+  - **S3** : bucket déclencheur (ObjectCreated)
+  - **Lambda** : traitement + notification
+  - **DynamoDB** : `TableOffres`, `TableEtudiants`
+  - **SNS** : topic email
+- **Variable d’environnement Lambda** :
+  - `SNS_TOPIC_ARN` : ARN du topic SNS
 
 ---
 
-## Nettoyage (éviter les coûts)
+## Structure du dépôt
 
-```bash
-aws lambda delete-function --function-name NotifieurOffres --region eu-west-3
-
-aws dynamodb delete-table --table-name TableOffres --region eu-west-3
-aws dynamodb delete-table --table-name TableEtudiants --region eu-west-3
-
-aws sns delete-topic --topic-arn "$TOPIC_ARN" --region eu-west-3
-
-aws s3 rm "s3://$BUCKET_NAME/" --recursive
-aws s3 rb "s3://$BUCKET_NAME" --force --region eu-west-3
-
-aws iam detach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-aws iam detach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
-aws iam detach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/AmazonSNSFullAccess
-aws iam detach-role-policy --role-name LambdaOffreRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-aws iam delete-role --role-name LambdaOffreRole
-```
+- `README.md` : présentation du projet (ce fichier)
+- `LAB-024-S3-Lambda-SNS-Alertes-offres-alternance.md` : guide complet du lab (déploiement / tests / nettoyage)
 
 ---
 
@@ -265,6 +122,10 @@ aws iam delete-role --role-name LambdaOffreRole
   - vérifier que `SNS_TOPIC_ARN` est bien défini
 
 ---
+## Roadmap (idées d’amélioration)
 
-
+- Filtrer par **mots-clés** (ex: extraction texte PDF)
+- Remplacer `Scan` par un modèle de données plus scalable (index / table de correspondance)
+- Ajouter une **API** de consultation (API Gateway + Lambda)
+- Ajouter des **alertes CloudWatch** (erreurs Lambda / throttling)
 
